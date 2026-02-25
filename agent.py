@@ -1,51 +1,94 @@
 import requests
+import os
+import json
+from datetime import datetime
 
-BOT_TOKEN = "8367507141:AAE-tpC4kKLU8MzJaQncTJS9ailpr23viNY"
-CHAT_ID = "8779770443"
+API_KEY = os.getenv("RAPIDAPI_KEY")
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+CACHE_FILE = "sent_matches.json"
+
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_to_cache(match_id):
+    cache = load_cache()
+    cache.append(match_id)
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache[-50:], f)
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {
-        "chat_id": CHAT_ID,
-        "text": msg
-    }
+    data = {"chat_id": CHAT_ID, "text": msg}
     requests.post(url, data=data)
 
-def calc_value(expected_goals, odds):
+def dynamic_probability(minute, home_score, away_score):
+    base = 0.55
+    goal_factor = (home_score + away_score) * 0.05
+    time_factor = (minute / 15) * 0.1
+    return min(0.85, base + goal_factor + time_factor)
 
-    # egyszerű Over 2.5 valószínűség becslés
-    if expected_goals >= 3.8:
-        true_prob = 0.62
-    elif expected_goals >= 3.3:
-        true_prob = 0.55
-    elif expected_goals >= 2.9:
-        true_prob = 0.50
-    else:
-        true_prob = 0.42
+def run_agent():
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] E-Football LIVE keresés...")
 
-    market_prob = 1 / odds
+    url = "https://flashscore4.p.rapidapi.com/v2/matches/live"
+    querystring = {"sport_id":"1"}
 
-    value = true_prob - market_prob
+    headers = {
+        "X-RapidAPI-Key": API_KEY,
+        "X-RapidAPI-Host": "flashscore4.p.rapidapi.com"
+    }
 
-    return true_prob, market_prob, value
+    r = requests.get(url, headers=headers, params=querystring)
+    print("STATUS:", r.status_code)
 
-if __name__ == "__main__":
+    if r.status_code != 200:
+        print("API hiba")
+        return
 
-    # TESZT adat
-    expected_goals = 3.7
-    odds = 2.05
+    data = r.json()
 
-    true_prob, market_prob, value = calc_value(expected_goals, odds)
+    if not isinstance(data, dict):
+        return
 
-    if value > 0.05:
-        msg = f"""VALUE OVER JELZÉS
+    sent_cache = load_cache()
 
-Expected Goals: {expected_goals}
-Odds: {odds}
+    for event in data.get("DATA", []):
+        if not isinstance(event, dict):
+            continue
 
-Valós esély: {round(true_prob*100,1)}%
-Piaci esély: {round(market_prob*100,1)}%
+        if "E-Football" not in str(event.get("tournament", {}).get("name","")):
+            continue
 
-VALUE: {round(value*100,1)}%
+        match_id = str(event.get("id"))
+
+        if match_id in sent_cache:
+            continue
+
+        minute = int(event.get("time", {}).get("minute", 0))
+        home_score = int(event.get("homeScore", 0))
+        away_score = int(event.get("awayScore", 0))
+
+        prob = dynamic_probability(minute, home_score, away_score)
+        odds = 1.85
+
+        value = prob * odds - 1
+
+        if value > 0.03:
+            msg = f"""
+🔥 E-Football VALUE
+
+⚽ {event.get('home',{}).get('name')} vs {event.get('away',{}).get('name')}
+⏱️ {minute}'
+📊 Score: {home_score}-{away_score}
+
+📈 Value: {round(value,3)}
 """
-        send_telegram(msg)
+            send_telegram(msg)
+            save_to_cache(match_id)
+
+run_agent()
